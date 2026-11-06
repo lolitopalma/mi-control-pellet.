@@ -1,0 +1,243 @@
+
+import './style.css';
+import { supabase } from './supabase.js';
+
+const app = document.querySelector('#app');
+
+let user = null;
+let purchases = [];
+let openings = [];
+
+const today = () => {
+  const d = new Date();
+  return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`;
+};
+
+const euros = n => Number(n || 0).toLocaleString('es-ES', {
+  style: 'currency',
+  currency: 'EUR'
+});
+
+const escapeHTML = value => String(value ?? '').replace(/[&<>"']/g, c => ({
+  '&': '&amp;', '<': '&lt;', '>': '&gt;',
+  '"': '&quot;', "'": '&#39;'
+}[c]));
+
+function renderLogin() {
+  app.innerHTML = `
+    <main class="login">
+      <div class="logo">🔥</div>
+      <h1>Mi control de pellet</h1>
+      <p>Controla tus compras, aperturas y consumo.</p>
+      <form id="login-form" class="panel">
+        <label>Tu correo electrónico</label>
+        <input name="email" type="email" placeholder="nombre@correo.com" required>
+        <button>Enviar enlace de acceso</button>
+        <p id="login-message" class="message"></p>
+      </form>
+    </main>
+  `;
+
+  document.querySelector('#login-form').addEventListener('submit', async e => {
+    e.preventDefault();
+    const email = new FormData(e.target).get('email');
+    const message = document.querySelector('#login-message');
+    message.textContent = 'Enviando enlace...';
+
+    const { error } = await supabase.auth.signInWithOtp({
+      email,
+      options: { emailRedirectTo: window.location.origin }
+    });
+
+    message.textContent = error
+      ? error.message
+      : '¡Enlace enviado! Revisa tu correo y pulsa el enlace para entrar.';
+  });
+}
+
+function getStats() {
+  const stock = purchases.reduce((sum, p) => sum + Number(p.sack_count), 0) - openings.length;
+  const spending = purchases.reduce((sum, p) => sum + Number(p.total_cost), 0);
+  const sacksBought = purchases.reduce((sum, p) => sum + Number(p.sack_count), 0);
+  const averagePrice = sacksBought ? spending / sacksBought : 0;
+
+  const sorted = [...openings].sort((a, b) =>
+    a.opening_date.localeCompare(b.opening_date)
+  );
+
+  const intervals = [];
+  for (let i = 1; i < sorted.length; i++) {
+    const days = (new Date(sorted[i].opening_date + 'T12:00:00') -
+      new Date(sorted[i - 1].opening_date + 'T12:00:00')) / 86400000;
+    if (days > 0) intervals.push(days);
+  }
+
+  const averageDays = intervals.length
+    ? intervals.reduce((a, b) => a + b, 0) / intervals.length
+    : 0;
+
+  return {
+    stock,
+    spending,
+    sacksBought,
+    averagePrice,
+    averageDays,
+    forecast: stock > 0 && averageDays > 0
+      ? Math.round(stock * averageDays)
+      : null
+  };
+}
+
+async function loadData() {
+  app.innerHTML = '<main class="loading">Cargando tus datos...</main>';
+
+  const [p, o] = await Promise.all([
+    supabase.from('purchases').select('*').order('purchase_date', { ascending: false }),
+    supabase.from('openings').select('*').order('opening_date', { ascending: false })
+  ]);
+
+  if (p.error || o.error) {
+    app.innerHTML = `<main class="panel"><h2>Error al cargar</h2><p>${escapeHTML(p.error?.message || o.error?.message)}</p><button id="retry">Reintentar</button></main>`;
+    document.querySelector('#retry').onclick = loadData;
+    return;
+  }
+
+  purchases = p.data;
+  openings = o.data;
+  renderDashboard();
+}
+
+function renderDashboard() {
+  const s = getStats();
+
+  app.innerHTML = `
+    <header>
+      <div><span class="eyebrow">TU HOGAR</span><h1>🔥 Mi pellet</h1></div>
+      <button id="logout" class="secondary small">Salir</button>
+    </header>
+
+    <main>
+      <section class="stats">
+        <article class="stat highlight">
+          <span>Existencias</span>
+          <strong>${s.stock}</strong>
+          <small>sacos de 15 kg</small>
+        </article>
+        <article class="stat">
+          <span>Duración media</span>
+          <strong>${s.averageDays ? s.averageDays.toFixed(1).replace('.', ',') : '—'}</strong>
+          <small>días por saco</small>
+        </article>
+        <article class="stat">
+          <span>Gasto total</span>
+          <strong>${euros(s.spending)}</strong>
+          <small>${s.sacksBought} sacos comprados</small>
+        </article>
+        <article class="stat">
+          <span>Precio medio</span>
+          <strong>${euros(s.averagePrice)}</strong>
+          <small>por saco</small>
+        </article>
+      </section>
+
+      <section class="panel forecast">
+        <span>📅 Previsión de existencias</span>
+        <strong>${s.forecast !== null ? `Aproximadamente ${s.forecast} días` : 'Necesitamos más aperturas'}</strong>
+        <small>Estimación basada en tus aperturas registradas.</small>
+      </section>
+
+      <section class="panel">
+        <h2>🛒 Registrar compra</h2>
+        <form id="purchase-form">
+          <label>Fecha de compra</label>
+          <input type="date" name="date" value="${today()}" required>
+          <label>Número de sacos (15 kg)</label>
+          <input type="number" name="count" min="1" step="1" placeholder="Ej. 20" required>
+          <label>Coste total (€)</label>
+          <input type="number" name="cost" min="0" step="0.01" placeholder="Ej. 120" required>
+          <button>Guardar compra</button>
+        </form>
+      </section>
+
+      <section class="panel">
+        <h2>🔥 Registrar apertura</h2>
+        <p>Registra cada vez que empiezas un saco nuevo.</p>
+        <form id="opening-form">
+          <label>Fecha de apertura</label>
+          <input type="date" name="date" value="${today()}" required>
+          <button ${s.stock <= 0 ? 'disabled' : ''}>Registrar apertura de saco</button>
+          ${s.stock <= 0 ? '<small>No tienes sacos disponibles. Registra una compra primero.</small>' : ''}
+        </form>
+      </section>
+
+      <section class="panel">
+        <h2>📦 Últimas compras</h2>
+        ${purchases.length ? purchases.slice(0, 5).map(p => `
+          <div class="record">
+            <span>${escapeHTML(p.purchase_date)} · ${p.sack_count} sacos</span>
+            <strong>${euros(p.total_cost)}</strong>
+          </div>`).join('') : '<p>Aún no has registrado compras.</p>'}
+      </section>
+
+      <section class="panel">
+        <h2>🪵 Últimas aperturas</h2>
+        ${openings.length ? openings.slice(0, 5).map(o => `
+          <div class="record">
+            <span>${escapeHTML(o.opening_date)}</span>
+            <strong>1 saco</strong>
+          </div>`).join('') : '<p>Aún no has registrado aperturas.</p>'}
+      </section>
+      <p class="footer">Mi control de pellet · Saco de 15 kg</p>
+    </main>
+  `;
+
+  document.querySelector('#logout').onclick = async () => {
+    await supabase.auth.signOut();
+    renderLogin();
+  };
+
+  document.querySelector('#purchase-form').onsubmit = async e => {
+    e.preventDefault();
+    const data = new FormData(e.target);
+    const { error } = await supabase.from('purchases').insert({
+      user_id: user.id,
+      purchase_date: data.get('date'),
+      sack_count: Number(data.get('count')),
+      total_cost: Number(data.get('cost'))
+    });
+    if (error) alert(error.message);
+    else {
+      alert('Compra guardada correctamente.');
+      await loadData();
+    }
+  };
+
+  document.querySelector('#opening-form').onsubmit = async e => {
+    e.preventDefault();
+    const data = new FormData(e.target);
+    const { error } = await supabase.from('openings').insert({
+      user_id: user.id,
+      opening_date: data.get('date')
+    });
+    if (error) alert(error.message);
+    else {
+      alert('Apertura guardada correctamente.');
+      await loadData();
+    }
+  };
+}
+
+async function start() {
+  const { data: { session } } = await supabase.auth.getSession();
+  user = session?.user || null;
+  if (user) await loadData();
+  else renderLogin();
+}
+
+supabase.auth.onAuthStateChange((_event, session) => {
+  user = session?.user || null;
+  if (user) loadData();
+  else renderLogin();
+});
+
+start();
